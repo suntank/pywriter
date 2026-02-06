@@ -24,6 +24,7 @@ class FileTree(Gtk.Box):
         self.app = app
         self._root = None
         self._monitor = None
+        self._expanded_paths = set()  # Track expanded paths
 
         # Header
         header = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=2)
@@ -96,9 +97,13 @@ class FileTree(Gtk.Box):
             self._monitor.cancel()
             self._monitor = None
         if self._root and self._root.is_dir():
-            gfile = Gio.File.new_for_path(str(self._root))
-            self._monitor = gfile.monitor_directory(Gio.FileMonitorFlags.NONE, None)
-            self._monitor.connect("changed", self._on_fs_changed)
+            try:
+                gfile = Gio.File.new_for_path(str(self._root))
+                self._monitor = gfile.monitor_directory(Gio.FileMonitorFlags.NONE, None)
+                self._monitor.connect("changed", self._on_fs_changed)
+            except Exception as e:
+                print(f"Failed to setup file monitor: {e}")
+                # Fallback to manual refresh only
 
     def _on_fs_changed(self, monitor, file, other_file, event_type):
         if event_type in (Gio.FileMonitorEvent.CREATED,
@@ -107,10 +112,32 @@ class FileTree(Gtk.Box):
                           Gio.FileMonitorEvent.MOVED_OUT):
             GLib.timeout_add(300, self.refresh)
 
+    def _save_expanded_state(self):
+        """Save the current expanded state of the tree."""
+        self._expanded_paths.clear()
+        def collect_expanded(model, path, it):
+            if self.tree.row_expanded(path):
+                filepath = model.get_value(it, self.COL_PATH)
+                self._expanded_paths.add(filepath)
+            return False
+        self.store.foreach(collect_expanded)
+    
+    def _restore_expanded_state(self):
+        """Restore the expanded state of the tree."""
+        def restore_expanded(model, path, it):
+            filepath = model.get_value(it, self.COL_PATH)
+            if filepath in self._expanded_paths:
+                self.tree.expand_row(path, False)
+            return False
+        self.store.foreach(restore_expanded)
+
     def refresh(self):
+        self._save_expanded_state()
         self.store.clear()
         if self._root and self._root.is_dir():
             self._populate(self._root, None)
+            # Restore expanded state after population
+            GLib.idle_add(self._restore_expanded_state)
         return False
 
     def _populate(self, dirpath, parent_iter):
@@ -179,6 +206,11 @@ class FileTree(Gtk.Box):
         item_rename.connect("activate", lambda w: self._rename_item(filepath))
         menu.append(item_rename)
 
+        if not is_dir:
+            item_duplicate = Gtk.MenuItem(label="Duplicate")
+            item_duplicate.connect("activate", lambda w: self._duplicate_item(filepath))
+            menu.append(item_duplicate)
+
         item_delete = Gtk.MenuItem(label="Delete")
         item_delete.connect("activate", lambda w: self._delete_item(filepath, is_dir))
         menu.append(item_delete)
@@ -189,6 +221,7 @@ class FileTree(Gtk.Box):
     def _prompt_name(self, title, default=""):
         dialog = Gtk.Dialog(title=title, parent=self.app.window,
                             flags=Gtk.DialogFlags.MODAL)
+        dialog.set_default_size(400, 150)  # Make dialog larger
         dialog.add_buttons(Gtk.STOCK_CANCEL, Gtk.ResponseType.CANCEL,
                            Gtk.STOCK_OK, Gtk.ResponseType.OK)
         entry = Gtk.Entry()
@@ -204,13 +237,37 @@ class FileTree(Gtk.Box):
             return name
         return None
 
+    def _get_selected_directory(self):
+        """Get the directory where new files should be created based on selection."""
+        selection = self.tree.get_selection()
+        if selection:
+            model, paths = selection.get_selected_rows()
+            if paths:
+                # Get the first selected path
+                treepath = paths[0]
+                it = self.store.get_iter(treepath)
+                is_dir = self.store.get_value(it, self.COL_IS_DIR)
+                filepath = self.store.get_value(it, self.COL_PATH)
+                
+                if is_dir:
+                    # If a directory is selected, create file in it
+                    return filepath
+                else:
+                    # If a file is selected, create file in its parent directory
+                    return str(Path(filepath).parent)
+        
+        # No selection, use root
+        return str(self._root) if self._root else None
+
     def _on_new_file(self, btn):
-        if self._root:
-            self._create_file_in(str(self._root))
+        target_dir = self._get_selected_directory()
+        if target_dir:
+            self._create_file_in(target_dir)
 
     def _on_new_folder(self, btn):
-        if self._root:
-            self._create_folder_in(str(self._root))
+        target_dir = self._get_selected_directory()
+        if target_dir:
+            self._create_folder_in(target_dir)
 
     def _create_file_in(self, dirpath):
         name = self._prompt_name("New File")
@@ -218,7 +275,9 @@ class FileTree(Gtk.Box):
             p = Path(dirpath) / name
             try:
                 p.touch()
+                # Force refresh and re-setup monitor to catch changes
                 self.refresh()
+                self._setup_monitor()
                 self.app.editor_manager.open_document(str(p))
             except OSError as e:
                 self._error_dialog(str(e))
@@ -229,9 +288,43 @@ class FileTree(Gtk.Box):
             p = Path(dirpath) / name
             try:
                 p.mkdir(parents=True, exist_ok=True)
+                # Force refresh and re-setup monitor to catch changes
                 self.refresh()
+                self._setup_monitor()
             except OSError as e:
                 self._error_dialog(str(e))
+
+    def _duplicate_item(self, filepath):
+        """Duplicate a file with 'copy' suffix and numbering if needed."""
+        src = Path(filepath)
+        if not src.is_file():
+            return
+            
+        # Generate duplicate name
+        base_name = src.stem
+        suffix = src.suffix
+        parent = src.parent
+        
+        # Try base_name + copy, then base_name + copy 2, etc.
+        copy_name = f"{base_name} copy{suffix}"
+        copy_path = parent / copy_name
+        counter = 2
+        
+        while copy_path.exists():
+            copy_name = f"{base_name} copy {counter}{suffix}"
+            copy_path = parent / copy_name
+            counter += 1
+        
+        try:
+            import shutil
+            shutil.copy2(src, copy_path)
+            # Force refresh and re-setup monitor to catch changes
+            self.refresh()
+            self._setup_monitor()
+            # Open the duplicated file
+            self.app.editor_manager.open_document(str(copy_path))
+        except OSError as e:
+            self._error_dialog(str(e))
 
     def _rename_item(self, filepath):
         p = Path(filepath)
@@ -240,7 +333,9 @@ class FileTree(Gtk.Box):
             try:
                 new_path = p.parent / name
                 p.rename(new_path)
+                # Force refresh and re-setup monitor to catch changes
                 self.refresh()
+                self._setup_monitor()
             except OSError as e:
                 self._error_dialog(str(e))
 
@@ -261,7 +356,9 @@ class FileTree(Gtk.Box):
                     shutil.rmtree(p)
                 else:
                     p.unlink()
+                # Force refresh and re-setup monitor to catch changes
                 self.refresh()
+                self._setup_monitor()
             except OSError as e:
                 self._error_dialog(str(e))
 

@@ -28,6 +28,7 @@ class WorkspaceManager:
             title="Open Folder",
             parent=self.app.window,
             action=Gtk.FileChooserAction.SELECT_FOLDER)
+        dialog.set_default_size(600, 400)  # Make dialog larger
         dialog.add_buttons(
             Gtk.STOCK_CANCEL, Gtk.ResponseType.CANCEL,
             Gtk.STOCK_OPEN, Gtk.ResponseType.ACCEPT)

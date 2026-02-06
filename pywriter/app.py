@@ -243,14 +243,18 @@ class PyWriterApp:
 
         self.window.show_all()
 
-        # Open workspace if provided, otherwise open a welcome document
+        # Open workspace if provided, otherwise open current directory or welcome document
         if self._open_path:
             p = Path(self._open_path)
             if p.is_dir():
                 self.workspace.open_folder(p)
             elif p.is_file():
+                self.workspace.open_folder(p.parent)
                 self.editor_manager.open_document(str(p))
         else:
+            # Open current directory as workspace
+            current_dir = Path.cwd()
+            self.workspace.open_folder(current_dir)
             self._open_welcome()
 
         Gtk.main()

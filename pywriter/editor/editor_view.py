@@ -115,6 +115,10 @@ class FindBar(Gtk.Revealer):
             return
         mark = buf.get_insert()
         it = buf.get_iter_at_mark(mark)
+        # If we have a selection, start from the end of it
+        if buf.get_has_selection():
+            start, end = buf.get_selection_bounds()
+            it = end.copy()
         found, start, end, wrapped = self._search_context.forward(it)
         if found:
             buf.select_range(start, end)
@@ -141,11 +145,18 @@ class FindBar(Gtk.Revealer):
         buf = self._get_buffer()
         if not self._search_context or not buf:
             return
+        
+        # If no selection, try to find the first match
+        if not buf.get_has_selection():
+            self._on_next()
+            return
+            
         if buf.get_has_selection():
             start, end = buf.get_selection_bounds()
             replacement = self.replace_entry.get_text()
             self._search_context.replace(start, end, replacement, len(replacement.encode()))
-            self._on_next()
+            # Move to next match after replacement
+            GLib.idle_add(self._on_next)
 
     def _on_replace_all(self, *args):
         self._ensure_context()
@@ -308,6 +319,7 @@ class EditorManager(Gtk.Box):
         dialog = Gtk.FileChooserDialog(
             title="Save As", parent=self.app.window,
             action=Gtk.FileChooserAction.SAVE)
+        dialog.set_default_size(600, 400)  # Make dialog larger
         dialog.add_buttons(Gtk.STOCK_CANCEL, Gtk.ResponseType.CANCEL,
                            Gtk.STOCK_SAVE, Gtk.ResponseType.ACCEPT)
         dialog.set_do_overwrite_confirmation(True)
@@ -324,12 +336,17 @@ class EditorManager(Gtk.Box):
             path = dialog.get_filename()
             doc.save(path)
             self._update_tab_label(doc)
+            # Refresh file tree to show new file
+            if self.app.file_tree:
+                self.app.file_tree.refresh()
+                self.app.file_tree._setup_monitor()
         dialog.destroy()
 
     def open_file_dialog(self):
         dialog = Gtk.FileChooserDialog(
             title="Open File", parent=self.app.window,
             action=Gtk.FileChooserAction.OPEN)
+        dialog.set_default_size(600, 400)  # Make dialog larger
         dialog.add_buttons(Gtk.STOCK_CANCEL, Gtk.ResponseType.CANCEL,
                            Gtk.STOCK_OPEN, Gtk.ResponseType.ACCEPT)
         dialog.set_select_multiple(True)
